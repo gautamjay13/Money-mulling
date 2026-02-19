@@ -131,57 +131,119 @@ export class FraudDetector {
     this.suspiciousAccounts = suspicious.sort((a, b) => b.score - a.score);
   }
 
-  private detectFraudRings(): void {
-    const rings: Map<string, Set<string>> = new Map();
-    const suspiciousIds = new Set(this.suspiciousAccounts.map(a => a.id));
+  // private detectFraudRings(): void {
+  //   const rings: Map<string, Set<string>> = new Map();
+  //   const suspiciousIds = new Set(this.suspiciousAccounts.map(a => a.id));
 
-    // Find connected suspicious accounts
-    for (const tx of this.transactions) {
-      const senderSuspicious = suspiciousIds.has(tx.sender_id);
-      const receiverSuspicious = suspiciousIds.has(tx.receiver_id);
+  //   // Find connected suspicious accounts
+  //   for (const tx of this.transactions) {
+  //     const senderSuspicious = suspiciousIds.has(tx.sender_id);
+  //     const receiverSuspicious = suspiciousIds.has(tx.receiver_id);
 
-      if (senderSuspicious && receiverSuspicious) {
-        // Find existing ring or create new one
-        let ringId: string | null = null;
-        for (const [id, members] of rings.entries()) {
-          if (members.has(tx.sender_id) || members.has(tx.receiver_id)) {
-            ringId = id;
-            members.add(tx.sender_id);
-            members.add(tx.receiver_id);
-            break;
-          }
-        }
+  //     if (senderSuspicious && receiverSuspicious) {
+  //       // Find existing ring or create new one
+  //       let ringId: string | null = null;
+  //       for (const [id, members] of rings.entries()) {
+  //         if (members.has(tx.sender_id) || members.has(tx.receiver_id)) {
+  //           ringId = id;
+  //           members.add(tx.sender_id);
+  //           members.add(tx.receiver_id);
+  //           break;
+  //         }
+  //       }
 
-        if (!ringId) {
-          ringId = `R-${String(rings.size + 1).padStart(3, "0")}`;
-          rings.set(ringId, new Set([tx.sender_id, tx.receiver_id]));
-        }
+  //       if (!ringId) {
+  //         ringId = `R-${String(rings.size + 1).padStart(3, "0")}`;
+  //         rings.set(ringId, new Set([tx.sender_id, tx.receiver_id]));
+  //       }
+  //     }
+  //   }
+
+  //   // Convert to fraud rings with pattern detection
+  //   this.fraudRings = Array.from(rings.entries()).map(([ringId, members]) => {
+  //     const memberArray = Array.from(members);
+  //     const pattern = this.detectRingPattern(memberArray);
+  //     const riskScore = this.calculateRingRiskScore(memberArray);
+
+  //     // Assign ring IDs to suspicious accounts
+  //     memberArray.forEach(accountId => {
+  //       const account = this.suspiciousAccounts.find(a => a.id === accountId);
+  //       if (account) {
+  //         account.ringId = ringId;
+  //       }
+  //     });
+
+  //     return {
+  //       ringId,
+  //       pattern,
+  //       memberCount: memberArray.length,
+  //       riskScore: Math.round(riskScore * 100) / 100,
+  //       members: memberArray,
+  //     };
+  //   });
+  // }
+
+private detectFraudRings(): void {
+  const suspiciousIds = new Set(this.suspiciousAccounts.map(a => a.id));
+
+  // Build full transaction graph (ALL accounts)
+  const graph: Map<string, Set<string>> = new Map();
+
+  for (const tx of this.transactions) {
+    if (!graph.has(tx.sender_id)) graph.set(tx.sender_id, new Set());
+    if (!graph.has(tx.receiver_id)) graph.set(tx.receiver_id, new Set());
+
+    graph.get(tx.sender_id)!.add(tx.receiver_id);
+    graph.get(tx.receiver_id)!.add(tx.sender_id);
+  }
+
+  const visited = new Set<string>();
+  const rings: FraudRing[] = [];
+  let ringCounter = 1;
+
+  for (const accountId of graph.keys()) {
+    if (visited.has(accountId)) continue;
+
+    const members: string[] = [];
+    const stack = [accountId];
+
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      if (visited.has(current)) continue;
+
+      visited.add(current);
+      members.push(current);
+
+      for (const neighbor of graph.get(current) || []) {
+        if (!visited.has(neighbor)) stack.push(neighbor);
       }
     }
 
-    // Convert to fraud rings with pattern detection
-    this.fraudRings = Array.from(rings.entries()).map(([ringId, members]) => {
-      const memberArray = Array.from(members);
-      const pattern = this.detectRingPattern(memberArray);
-      const riskScore = this.calculateRingRiskScore(memberArray);
+    // Only consider components that contain multiple suspicious accounts
+    const suspiciousMembers = members.filter(id => suspiciousIds.has(id));
 
-      // Assign ring IDs to suspicious accounts
-      memberArray.forEach(accountId => {
+    if (suspiciousMembers.length > 1) {
+      const ringId = `R-${String(ringCounter++).padStart(3, "0")}`;
+      const pattern = this.detectRingPattern(members);
+      const riskScore = this.calculateRingRiskScore(suspiciousMembers);
+
+      suspiciousMembers.forEach(accountId => {
         const account = this.suspiciousAccounts.find(a => a.id === accountId);
-        if (account) {
-          account.ringId = ringId;
-        }
+        if (account) account.ringId = ringId;
       });
 
-      return {
+      rings.push({
         ringId,
         pattern,
-        memberCount: memberArray.length,
+        memberCount: members.length,
         riskScore: Math.round(riskScore * 100) / 100,
-        members: memberArray,
-      };
-    });
+        members,
+      });
+    }
   }
+
+  this.fraudRings = rings;
+}
 
   private hasCircularFlow(accountId: string): boolean {
     const stats = this.accountStats.get(accountId);
